@@ -20,9 +20,15 @@
 #import "UIView+React.h"
 
 NSString *const RCTJSNavigationScheme = @"react-js-navigation";
-NSString *const RCTJSPostMessageHost = @"postMessage";
 
-@interface RCTWebView () <UIWebViewDelegate, RCTAutoInsetsProtocol, NSURLConnectionDelegate>
+static NSString *const kPostMessageHost = @"postMessage";
+
+@interface RCTWebView () <UIWebViewDelegate, RCTAutoInsetsProtocol, NSURLConnectionDelegate> {
+  BOOL _authenticated;
+  NSURLConnection *_urlConnection;
+  
+  NSURLRequest *_request;
+}
 
 @property (nonatomic, copy) RCTDirectEventBlock onLoadingStart;
 @property (nonatomic, copy) RCTDirectEventBlock onLoadingFinish;
@@ -36,9 +42,6 @@ NSString *const RCTJSPostMessageHost = @"postMessage";
 {
   UIWebView *_webView;
   NSString *_injectedJavaScript;
-  NSURLRequest *_request;
-  NSURLConnection *_urlConnection;
-  BOOL _ignoreSSLCheck;
 }
 
 - (void)dealloc
@@ -54,15 +57,9 @@ NSString *const RCTJSPostMessageHost = @"postMessage";
     _contentInset = UIEdgeInsetsZero;
     _webView = [[UIWebView alloc] initWithFrame:self.bounds];
     _webView.delegate = self;
-    _ignoreSSLCheck = false;
     [self addSubview:_webView];
   }
   return self;
-}
-
-- (void)setSSLCheck: (BOOL)value {
-  
-  _ignoreSSLCheck = value;
 }
 
 RCT_NOT_IMPLEMENTED(- (instancetype)initWithCoder:(NSCoder *)aDecoder)
@@ -139,15 +136,11 @@ RCT_NOT_IMPLEMENTED(- (instancetype)initWithCoder:(NSCoder *)aDecoder)
       [_webView loadHTMLString:@"" baseURL:nil];
       return;
     }
+    _urlConnection = [[NSURLConnection alloc] initWithRequest:request delegate:self];
+    [_urlConnection start];
     
-    if (true) {
-      [_webView loadRequest:request];
-    } else {
-      _urlConnection = [[NSURLConnection alloc] initWithRequest:request delegate:self];
-      [_urlConnection start];
-      
-      _request = request;
-    }
+    _request = request;
+    //[_webView loadRequest:request];
   }
 }
 
@@ -257,7 +250,7 @@ RCT_NOT_IMPLEMENTED(- (instancetype)initWithCoder:(NSCoder *)aDecoder)
     }
   }
   
-  if (isJSNavigation && [request.URL.host isEqualToString:RCTJSPostMessageHost]) {
+  if (isJSNavigation && [request.URL.host isEqualToString:kPostMessageHost]) {
     NSString *data = request.URL.query;
     data = [data stringByReplacingOccurrencesOfString:@"+" withString:@" "];
     data = [data stringByReplacingPercentEscapesUsingEncoding:NSUTF8StringEncoding];
@@ -266,9 +259,54 @@ RCT_NOT_IMPLEMENTED(- (instancetype)initWithCoder:(NSCoder *)aDecoder)
     [event addEntriesFromDictionary: @{
                                        @"data": data,
                                        }];
+    
+    NSString *source = @"document.dispatchEvent(new MessageEvent('message:received'));";
+    
+    [_webView stringByEvaluatingJavaScriptFromString:source];
+    
     _onMessage(event);
   }
   
+  //  if ((request != nil) && (request.URL != nil)) {
+  //    NSString *requestString = [request.URL absoluteString];
+  //    if ([requestString hasPrefix:@"commvaultedge://userLogin?"]) {
+  //
+  //      requestString = [requestString substringFromIndex:[@"commvaultedge://userLogin?" length]];
+  //      NSArray *array = [requestString componentsSeparatedByString:@"&"];
+  //      NSString *userGuid = nil;
+  //      NSString *aliasName = nil;
+  //      NSString *userToken = nil;
+  //      NSString *username = nil;
+  //      for (NSString *samlRespComponent in array) {
+  //
+  //        if ([samlRespComponent hasPrefix:@"token="]) {
+  //          userToken = [samlRespComponent substringFromIndex:[@"token=" length]];
+  //          userToken = [userToken stringByRemovingPercentEncoding];
+  //          continue;
+  //        } else if ([samlRespComponent hasPrefix:@"userId="]) {
+  //          aliasName = [samlRespComponent substringFromIndex:[@"userId=" length]];
+  //          continue;
+  //        } else if ([samlRespComponent hasPrefix:@"userGuid="]) {
+  //          userGuid = [samlRespComponent substringFromIndex:[@"userGuid=" length]];
+  //          continue;
+  //        } else if ([samlRespComponent hasPrefix:@"canonicalName="]) {
+  //          username = [samlRespComponent substringFromIndex:[@"canonicalName=" length]];
+  //          continue;
+  //        }
+  //      }
+  //
+  //      NSUserDefaults *userDefaults = [NSUserDefaults standardUserDefaults];
+  //      [userDefaults setObject:userGuid forKey:@"userGuid"];
+  //      [userDefaults setObject:aliasName forKey:@"aliasName"];
+  //      [userDefaults setObject:userToken forKey:@"userToken"];
+  //      [userDefaults setObject:username forKey:@"username"];
+  //
+  //      dispatch_async(dispatch_get_main_queue(), ^{
+  //        [self loginSuccess];
+  //      });
+  //      return NO;
+  //    }
+  //  }
   // JS Navigation handler
   return !isJSNavigation;
 }
@@ -281,6 +319,14 @@ RCT_NOT_IMPLEMENTED(- (instancetype)initWithCoder:(NSCoder *)aDecoder)
       // a new URL in the WebView before the previous one came back. We can just
       // ignore these since they aren't real errors.
       // http://stackoverflow.com/questions/1024748/how-do-i-fix-nsurlerrordomain-error-999-in-iphone-3-0-os
+      return;
+    }
+    
+    if ([error.domain isEqualToString:@"WebKitErrorDomain"] && error.code == 102) {
+      // Error code 102 "Frame load interrupted" is raised by the UIWebView if
+      // its delegate returns FALSE from webView:shouldStartLoadWithRequest:navigationType
+      // when the URL is from an http redirect. This is a common pattern when
+      // implementing OAuth with a WebView.
       return;
     }
     
@@ -309,10 +355,28 @@ RCT_NOT_IMPLEMENTED(- (instancetype)initWithCoder:(NSCoder *)aDecoder)
     }
 #endif
     NSString *source = [NSString stringWithFormat:
-                        @"window.originalPostMessage = window.postMessage;"
+                        @"(function() {"
+                        "window.originalPostMessage = window.postMessage;"
+                        
+                        "var messageQueue = [];"
+                        "var messagePending = false;"
+                        
+                        "function processQueue() {"
+                        "if (!messageQueue.length || messagePending) return;"
+                        "messagePending = true;"
+                        "window.location = '%@://%@?' + encodeURIComponent(messageQueue.shift());"
+                        "}"
+                        
                         "window.postMessage = function(data) {"
-                        "window.location = '%@://%@?' + encodeURIComponent(String(data));"
-                        "};", RCTJSNavigationScheme, RCTJSPostMessageHost
+                        "messageQueue.push(String(data));"
+                        "processQueue();"
+                        "};"
+                        
+                        "document.addEventListener('message:received', function(e) {"
+                        "messagePending = false;"
+                        "processQueue();"
+                        "});"
+                        "})();", RCTJSNavigationScheme, kPostMessageHost
                         ];
     [webView stringByEvaluatingJavaScriptFromString:source];
   }
@@ -330,14 +394,16 @@ RCT_NOT_IMPLEMENTED(- (instancetype)initWithCoder:(NSCoder *)aDecoder)
   }
 }
 
-#pragma mark - NSURLConncetion delegate
-
 - (void)connection:(NSURLConnection *)connection didReceiveAuthenticationChallenge:(NSURLAuthenticationChallenge *)challenge
 {
   
+  NSLog(@"Authentication challenge");
   if ([challenge previousFailureCount] == 0)
   {
+    _authenticated = YES;
+    
     NSURLCredential *credential = [NSURLCredential credentialForTrust:challenge.protectionSpace.serverTrust];
+    
     [challenge.sender useCredential:credential forAuthenticationChallenge:challenge];
     
   } else {
@@ -346,9 +412,12 @@ RCT_NOT_IMPLEMENTED(- (instancetype)initWithCoder:(NSCoder *)aDecoder)
   
 }
 
+
 - (void)connection:(NSURLConnection *)connection didReceiveResponse:(NSURLResponse *)response
 {
+  NSLog(@"response");
   // remake a webview call now that authentication has passed ok.
+  _authenticated = YES;
   [_webView loadRequest:_request];
   
   //Cancel the URL connection otherwise we double up (webview + url connection, same url = no good!)
@@ -357,6 +426,7 @@ RCT_NOT_IMPLEMENTED(- (instancetype)initWithCoder:(NSCoder *)aDecoder)
 
 - (void)connection:(NSURLConnection *)connection didFailWithError:(NSError *)error {
   
+  NSLog(@"error");
   dispatch_async(dispatch_get_main_queue(), ^{
     
   });
@@ -365,11 +435,17 @@ RCT_NOT_IMPLEMENTED(- (instancetype)initWithCoder:(NSCoder *)aDecoder)
 //We use this method is to accept an untrusted site which unfortunately we need to do, as our PVM servers are self signed.
 - (BOOL)connection:(NSURLConnection *)connection canAuthenticateAgainstProtectionSpace:(NSURLProtectionSpace *)protectionSpace
 {
+  NSLog(@"response1");
   return [protectionSpace.authenticationMethod isEqualToString:NSURLAuthenticationMethodServerTrust];
 }
 
 - (BOOL)connectionShouldUseCredentialStorage:(NSURLConnection *)connection {
+  NSLog(@"response2");
   return true;
 }
-@end
 
+- (void)loginSuccess {
+  
+  [[NSNotificationCenter defaultCenter] postNotificationName:@"LoginSuccess" object:nil userInfo:nil];
+}
+@end
