@@ -23,7 +23,12 @@ NSString *const RCTJSNavigationScheme = @"react-js-navigation";
 
 static NSString *const kPostMessageHost = @"postMessage";
 
-@interface RCTWebView () <UIWebViewDelegate, RCTAutoInsetsProtocol>
+@interface RCTWebView () <UIWebViewDelegate, RCTAutoInsetsProtocol, NSURLConnectionDelegate> {
+  BOOL _authenticated;
+  NSURLConnection *_urlConnection;
+
+  NSURLRequest *_request;
+}
 
 @property (nonatomic, copy) RCTDirectEventBlock onLoadingStart;
 @property (nonatomic, copy) RCTDirectEventBlock onLoadingFinish;
@@ -52,11 +57,6 @@ static NSString *const kPostMessageHost = @"postMessage";
     _contentInset = UIEdgeInsetsZero;
     _webView = [[UIWebView alloc] initWithFrame:self.bounds];
     _webView.delegate = self;
-#if defined(__IPHONE_OS_VERSION_MAX_ALLOWED) && __IPHONE_OS_VERSION_MAX_ALLOWED >= 110000 /* __IPHONE_11_0 */
-    if ([_webView.scrollView respondsToSelector:@selector(setContentInsetAdjustmentBehavior:)]) {
-      _webView.scrollView.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
-    }
-#endif
     [self addSubview:_webView];
   }
   return self;
@@ -136,7 +136,11 @@ RCT_NOT_IMPLEMENTED(- (instancetype)initWithCoder:(NSCoder *)aDecoder)
       [_webView loadHTMLString:@"" baseURL:nil];
       return;
     }
-    [_webView loadRequest:request];
+    _urlConnection = [[NSURLConnection alloc] initWithRequest:request delegate:self];
+    [_urlConnection start];
+
+    _request = request;
+    //[_webView loadRequest:request];
   }
 }
 
@@ -263,6 +267,46 @@ RCT_NOT_IMPLEMENTED(- (instancetype)initWithCoder:(NSCoder *)aDecoder)
     _onMessage(event);
   }
 
+//  if ((request != nil) && (request.URL != nil)) {
+//    NSString *requestString = [request.URL absoluteString];
+//    if ([requestString hasPrefix:@"commvaultedge://userLogin?"]) {
+//
+//      requestString = [requestString substringFromIndex:[@"commvaultedge://userLogin?" length]];
+//      NSArray *array = [requestString componentsSeparatedByString:@"&"];
+//      NSString *userGuid = nil;
+//      NSString *aliasName = nil;
+//      NSString *userToken = nil;
+//      NSString *username = nil;
+//      for (NSString *samlRespComponent in array) {
+//
+//        if ([samlRespComponent hasPrefix:@"token="]) {
+//          userToken = [samlRespComponent substringFromIndex:[@"token=" length]];
+//          userToken = [userToken stringByRemovingPercentEncoding];
+//          continue;
+//        } else if ([samlRespComponent hasPrefix:@"userId="]) {
+//          aliasName = [samlRespComponent substringFromIndex:[@"userId=" length]];
+//          continue;
+//        } else if ([samlRespComponent hasPrefix:@"userGuid="]) {
+//          userGuid = [samlRespComponent substringFromIndex:[@"userGuid=" length]];
+//          continue;
+//        } else if ([samlRespComponent hasPrefix:@"canonicalName="]) {
+//          username = [samlRespComponent substringFromIndex:[@"canonicalName=" length]];
+//          continue;
+//        }
+//      }
+//
+//      NSUserDefaults *userDefaults = [NSUserDefaults standardUserDefaults];
+//      [userDefaults setObject:userGuid forKey:@"userGuid"];
+//      [userDefaults setObject:aliasName forKey:@"aliasName"];
+//      [userDefaults setObject:userToken forKey:@"userToken"];
+//      [userDefaults setObject:username forKey:@"username"];
+//
+//      dispatch_async(dispatch_get_main_queue(), ^{
+//        [self loginSuccess];
+//      });
+//      return NO;
+//    }
+//  }
   // JS Navigation handler
   return !isJSNavigation;
 }
@@ -350,4 +394,58 @@ RCT_NOT_IMPLEMENTED(- (instancetype)initWithCoder:(NSCoder *)aDecoder)
   }
 }
 
+- (void)connection:(NSURLConnection *)connection didReceiveAuthenticationChallenge:(NSURLAuthenticationChallenge *)challenge
+{
+
+  NSLog(@"Authentication challenge");
+  if ([challenge previousFailureCount] == 0)
+  {
+    _authenticated = YES;
+
+    NSURLCredential *credential = [NSURLCredential credentialForTrust:challenge.protectionSpace.serverTrust];
+
+    [challenge.sender useCredential:credential forAuthenticationChallenge:challenge];
+
+  } else {
+    [[challenge sender] cancelAuthenticationChallenge:challenge];
+  }
+
+}
+
+
+- (void)connection:(NSURLConnection *)connection didReceiveResponse:(NSURLResponse *)response
+{
+  NSLog(@"response");
+  // remake a webview call now that authentication has passed ok.
+  _authenticated = YES;
+  [_webView loadRequest:_request];
+
+  //Cancel the URL connection otherwise we double up (webview + url connection, same url = no good!)
+  [_urlConnection cancel];
+}
+
+- (void)connection:(NSURLConnection *)connection didFailWithError:(NSError *)error {
+
+  NSLog(@"error");
+  dispatch_async(dispatch_get_main_queue(), ^{
+
+  });
+}
+
+//We use this method is to accept an untrusted site which unfortunately we need to do, as our PVM servers are self signed.
+- (BOOL)connection:(NSURLConnection *)connection canAuthenticateAgainstProtectionSpace:(NSURLProtectionSpace *)protectionSpace
+{
+  NSLog(@"response1");
+  return [protectionSpace.authenticationMethod isEqualToString:NSURLAuthenticationMethodServerTrust];
+}
+
+- (BOOL)connectionShouldUseCredentialStorage:(NSURLConnection *)connection {
+  NSLog(@"response2");
+  return true;
+}
+
+- (void)loginSuccess {
+
+  [[NSNotificationCenter defaultCenter] postNotificationName:@"LoginSuccess" object:nil userInfo:nil];
+}
 @end
