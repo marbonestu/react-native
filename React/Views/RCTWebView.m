@@ -426,10 +426,16 @@ RCT_NOT_IMPLEMENTED(- (instancetype)initWithCoder:(NSCoder *)aDecoder)
 
 - (void)connection:(NSURLConnection *)connection didFailWithError:(NSError *)error {
 
-  NSLog(@"error");
-  dispatch_async(dispatch_get_main_queue(), ^{
-
-  });
+ NSLog(@"error");
+ dispatch_async(dispatch_get_main_queue(), ^{
+   NSMutableDictionary<NSString *, id> *event = [self baseEvent];
+   [event addEntriesFromDictionary:@{
+                                     @"domain": error.domain,
+                                     @"code": @(error.code),
+                                     @"description": error.localizedDescription,
+                                     }];
+   _onLoadingError(event);
+ });
 }
 
 //We use this method is to accept an untrusted site which unfortunately we need to do, as our PVM servers are self signed.
